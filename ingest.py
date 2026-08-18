@@ -19,10 +19,20 @@ Commands:
       (meta.json, body.txt, attachments/). Prints NEW <dir> per item.
   python3 ingest.py projects
       Print current projects and deals as JSON (for matching).
+  python3 ingest.py version
+      Print the script version and the commands it supports. Version 2.x is required
+      by ROUTINE-CONNECTOR.md; 1.x is the IMAP-only script and lacks seen/mark/upload-b64.
+  python3 ingest.py seen [limit]
+      List already-processed message ids, so a connector-driven routine can skip them.
+  python3 ingest.py mark <message_id> "<subject>" <filed|review|skipped>
+      Record a processed message. Use this instead of `done` when the mail was read
+      through the Gmail connector rather than over IMAP.
   python3 ingest.py docs <project_id>
       List a project's existing documents (name, size, category) for dedup.
   python3 ingest.py upload <local_file> <project_id> <category>
       Upload a file to the project's data room and insert its documents row.
+  python3 ingest.py upload-b64 <project_id> <category> "<file_name>" @b64.txt
+      File a document from base64 bytes (what the Drive connector returns).
   python3 ingest.py insert <table> '<json>'         (or @file.json)
   python3 ingest.py update <table> <id> '<json>'    (or @file.json)
   python3 ingest.py review <workdir>
@@ -32,10 +42,12 @@ Commands:
       Write ingest_log and mark the email as read on the server.
 """
 
-import os, sys, json, re, time, hashlib, imaplib, email, mimetypes
+import os, sys, json, re, time, base64, hashlib, imaplib, email, mimetypes
 import datetime as dt
 import urllib.request, urllib.error
 from email.header import decode_header, make_header
+
+VERSION = "2.0-connector"   # 1.x = IMAP only; 2.x adds seen / mark / upload-b64
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 WORK = os.path.join(ROOT, "inbox_work")
@@ -72,6 +84,9 @@ def sb_req(method, path, body=None, headers=None, raw=False):
             return json.loads(t) if t.strip() else None
     except urllib.error.HTTPError as e:
         die("%s %s -> %s: %s" % (method, path, e.code, e.read().decode("utf-8", "replace")[:300]))
+    except urllib.error.URLError as e:
+        die("%s %s -> could not reach Supabase (%s). Check GENKA_SUPABASE_URL and that "
+            "the environment allows network access to that host." % (method, path, e.reason))
 
 
 def rest_select(q):
@@ -92,13 +107,29 @@ def rest_update(table, id_, patch):
                   {"Prefer": "return=representation"})
 
 
+def storage_put(dest, data, ctype="application/octet-stream"):
+    sb_req("POST", "/storage/v1/object/documents/" + dest, data,
+           {"Content-Type": ctype}, raw=True)
+    return dest
+
+
 def storage_upload(dest, local):
     ctype = mimetypes.guess_type(local)[0] or "application/octet-stream"
     with open(local, "rb") as f:
         data = f.read()
-    sb_req("POST", "/storage/v1/object/documents/" + dest, data,
-           {"Content-Type": ctype}, raw=True)
-    return dest
+    return storage_put(dest, data, ctype)
+
+
+def decode_b64(src):
+    """Accept raw base64, or @path to a file holding it. Tolerates whitespace
+    and data: URI prefixes, which is what Drive downloads often look like."""
+    raw = open(src[1:]).read() if src.startswith("@") else src
+    raw = re.sub(r"^data:[^,]*,", "", raw.strip())
+    raw = re.sub(r"\s+", "", raw)
+    pad = len(raw) % 4
+    if pad:
+        raw += "=" * (4 - pad)
+    return base64.b64decode(raw)
 
 
 # ------------------------------- imap -------------------------------
@@ -230,6 +261,29 @@ def cmd_projects():
     print(json.dumps({"projects": projects, "deals": deals}, indent=2, ensure_ascii=False))
 
 
+def cmd_version():
+    cmds = ["fetch", "projects", "seen", "mark", "docs", "upload", "upload-b64",
+            "insert", "update", "review", "done"]
+    print(json.dumps({
+        "version": VERSION,
+        "connector_ready": True,
+        "commands": cmds,
+    }, indent=2))
+
+
+def cmd_seen(limit="300"):
+    rows = rest_select("ingest_log?select=message_id,subject,outcome&order=processed_at.desc&limit=" + str(limit)) or []
+    print(json.dumps(rows, indent=2, ensure_ascii=False))
+
+
+def cmd_mark(message_id, subject, outcome):
+    """Record a processed message without touching IMAP (connector mode)."""
+    rest_insert("ingest_log", {
+        "message_id": message_id, "subject": subject, "outcome": outcome,
+    }, on_conflict="message_id")
+    print("marked %s -> %s" % (message_id, outcome))
+
+
 def cmd_docs(project_id):
     rows = rest_select("documents?select=id,category,file_name,file_size,created_at&project_id=eq.%s&order=created_at.desc" % project_id) or []
     print(json.dumps(rows, indent=2, ensure_ascii=False))
@@ -251,6 +305,21 @@ def cmd_upload(local, project_id, category):
     row = rest_insert("documents", {
         "project_id": project_id, "category": category, "file_name": name,
         "storage_path": dest, "file_size": os.path.getsize(local),
+    })
+    print(json.dumps(row, indent=2, ensure_ascii=False))
+
+
+def cmd_upload_b64(project_id, category, name, src):
+    """File a document whose bytes arrived as base64, e.g. from the Drive connector."""
+    data = decode_b64(src)
+    if not data:
+        die("decoded to zero bytes; check the base64 source")
+    dest = "%s/%d_%s" % (project_id, int(time.time()), re.sub(r"[^A-Za-z0-9._-]+", "_", name)[:120])
+    ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    storage_put(dest, data, ctype)
+    row = rest_insert("documents", {
+        "project_id": project_id, "category": category, "file_name": name,
+        "storage_path": dest, "file_size": len(data),
     })
     print(json.dumps(row, indent=2, ensure_ascii=False))
 
@@ -332,10 +401,18 @@ def main():
         cmd_fetch()
     elif c == "projects":
         cmd_projects()
+    elif c in ("version", "--version", "-v"):
+        cmd_version()
+    elif c == "seen":
+        cmd_seen(args[1] if len(args) > 1 else "300")
+    elif c == "mark" and len(args) == 4:
+        cmd_mark(args[1], args[2], args[3])
     elif c == "docs" and len(args) == 2:
         cmd_docs(args[1])
     elif c == "upload" and len(args) == 4:
         cmd_upload(args[1], args[2], args[3])
+    elif c == "upload-b64" and len(args) == 5:
+        cmd_upload_b64(args[1], args[2], args[3], args[4])
     elif c == "insert" and len(args) == 3:
         cmd_insert(args[1], args[2])
     elif c == "update" and len(args) == 4:

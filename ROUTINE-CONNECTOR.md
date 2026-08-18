@@ -5,7 +5,8 @@ over IMAP. Same job as `ROUTINE.md`: everything forwarded to the intake address 
 in the Genka Deals Supabase backend, filed when you are confident, queued for review when
 you are not.
 
-Use `ingest.py` for every Supabase write. Never delete emails or rows.
+Run everything from the **repository root**; the script lives at `routine/ingest.py`.
+Use it for every Supabase write. Never delete emails or rows.
 
 ## What the connector can and cannot do
 
@@ -23,9 +24,9 @@ So documents are handled one of two ways, in this order of preference:
      attachment filename, created around the time of the email. If the name is prefixed
      with the Gmail message id, match on that instead, which is exact.
    - download it, which returns base64; write that to a scratch file, e.g. `b64.txt`
-   - `python3 ingest.py docs <project_id>` and skip it if the same name and size is
+   - `python3 routine/ingest.py docs <project_id>` and skip it if the same name and size is
      already filed
-   - `python3 ingest.py upload-b64 <project_id> <category> "<original file name>" @b64.txt`
+   - `python3 routine/ingest.py upload-b64 <project_id> <category> "<original file name>" @b64.txt`
 
    This is the fully automatic path.
 2. **Flagged for the human.** Otherwise, name every attachment in the activity summary
@@ -36,9 +37,15 @@ Never claim a document was filed when only its name was recorded.
 
 ## Steps
 
+0. **Check the script version first.** Run `python3 routine/ingest.py version`.
+   It must report `"connector_ready": true` and version 2.x. If the command errors with
+   a usage block, or reports 1.x, the repository holds the old IMAP-only script: stop
+   immediately and report that `routine/ingest.py` is out of date, because `seen`,
+   `mark` and `upload-b64` do not exist in that version and nothing below will work.
+
 1. **Load context.**
-   - `python3 ingest.py projects` gives every project and deal, for matching.
-   - `python3 ingest.py seen 300` gives the message ids already processed. Skip anything
+   - `python3 routine/ingest.py projects` gives every project and deal, for matching.
+   - `python3 routine/ingest.py seen 300` gives the message ids already processed. Skip anything
      already listed; this is what stops double filing.
 
 2. **Find new mail.** Search the intake mailbox for threads from the last 14 days. Read
@@ -50,31 +57,31 @@ Never claim a document was filed when only its name was recorded.
 
    **A. Confident match to an existing project.**
    - Log the email:
-     `python3 ingest.py insert activities '{"project_id":"<id>","activity_type":"email","activity_date":"YYYY-MM-DD","summary":"<who, what it says, what it changes; name any attachments and whether they were filed>"}'`
+     `python3 routine/ingest.py insert activities '{"project_id":"<id>","activity_type":"email","activity_date":"YYYY-MM-DD","summary":"<who, what it says, what it changes; name any attachments and whether they were filed>"}'`
      Use the email's own date. Meeting invitations or recaps: `"activity_type":"meeting"`.
    - Documents: follow the two paths above. When uploading, classify into exactly one of
      teaser, im, financial_model, grid, land, permits, eia, corporate, nda, loi, spa, other.
-     Before uploading, run `python3 ingest.py docs <project_id>` and skip anything already
+     Before uploading, run `python3 routine/ingest.py docs <project_id>` and skip anything already
      there with the same name and size.
    - Clear risk stated (permit refusal, grid constraint, litigation, counterparty distress):
-     `python3 ingest.py insert risks '{"project_id":"<id>","title":"...","detail":"...","severity":"medium|high|blocker","status":"open"}'`
+     `python3 routine/ingest.py insert risks '{"project_id":"<id>","title":"...","detail":"...","severity":"medium|high|blocker","status":"open"}'`
    - Obvious next step for the active deal, only if the current next_action is empty or
      clearly superseded:
-     `python3 ingest.py update deals <deal_id> '{"next_action":"...","next_action_due":"YYYY-MM-DD"}'`
-   - Then: `python3 ingest.py mark "gmail:<messageId>" "<subject>" filed`
+     `python3 routine/ingest.py update deals <deal_id> '{"next_action":"...","next_action_due":"YYYY-MM-DD"}'`
+   - Then: `python3 routine/ingest.py mark "gmail:<messageId>" "<subject>" filed`
 
    **B. Not confident, or a new opportunity.** Queue it:
    ```
-   python3 ingest.py insert inbox_items '{"message_id":"gmail:<messageId>","received_at":"<ISO timestamp>","from_addr":"<sender>","subject":"<subject>","summary":"<2-3 sentences>","suggested_type":"activity|document|risk|new_project","suggested_project_id":"<uuid or null>","payload":{"project":{...},"deal":{...},"risk":{...},"next_action":{...},"docs":[{"file_name":"...","category":"teaser"}]},"status":"pending"}'
+   python3 routine/ingest.py insert inbox_items '{"message_id":"gmail:<messageId>","received_at":"<ISO timestamp>","from_addr":"<sender>","subject":"<subject>","summary":"<2-3 sentences>","suggested_type":"activity|document|risk|new_project","suggested_project_id":"<uuid or null>","payload":{"project":{...},"deal":{...},"risk":{...},"next_action":{...},"docs":[{"file_name":"...","category":"teaser"}]},"status":"pending"}'
    ```
    Include only the payload parts that apply. For a teaser of an unknown project use
    `"suggested_type":"new_project"` and fill `payload.project` from the teaser content you
    can read. List attachment filenames under `payload.docs` even when you could not upload
    them, so the human knows what to attach.
-   Then: `python3 ingest.py mark "gmail:<messageId>" "<subject>" review`
+   Then: `python3 routine/ingest.py mark "gmail:<messageId>" "<subject>" review`
 
    **C. Noise** (newsletters, spam, out-of-office, pure logistics):
-   `python3 ingest.py mark "gmail:<messageId>" "<subject>" skipped`
+   `python3 routine/ingest.py mark "gmail:<messageId>" "<subject>" skipped`
 
 4. **Report.** N filed and to which projects, N queued, N skipped, which documents were
    actually uploaded versus only flagged, and anything urgent (deadlines, blockers).
