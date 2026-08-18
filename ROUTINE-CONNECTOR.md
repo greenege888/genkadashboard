@@ -70,14 +70,73 @@ Never claim a document was filed when only its name was recorded.
      `python3 routine/ingest.py update deals <deal_id> '{"next_action":"...","next_action_due":"YYYY-MM-DD"}'`
    - Then: `python3 routine/ingest.py mark "gmail:<messageId>" "<subject>" filed`
 
-   **B. Not confident, or a new opportunity.** Queue it:
+   **B. Not confident, or a new opportunity.** Queue it for review.
+
+   Write the item to a scratch file first, then insert it. Do not try to pass this JSON
+   inline: teasers and legal text contain apostrophes that break shell quoting.
+
    ```
-   python3 routine/ingest.py insert inbox_items '{"message_id":"gmail:<messageId>","received_at":"<ISO timestamp>","from_addr":"<sender>","subject":"<subject>","summary":"<2-3 sentences>","suggested_type":"activity|document|risk|new_project","suggested_project_id":"<uuid or null>","payload":{"project":{...},"deal":{...},"risk":{...},"next_action":{...},"docs":[{"file_name":"...","category":"teaser"}]},"status":"pending"}'
+   cat > /tmp/item.json <<'JSON'
+   {
+     "message_id": "gmail:<messageId>",
+     "received_at": "<ISO timestamp>",
+     "from_addr": "<sender>",
+     "subject": "<subject>",
+     "summary": "2-3 sentences on what this is and why it matters",
+     "suggested_type": "activity | document | risk | new_project",
+     "suggested_project_id": null,
+     "status": "pending",
+     "payload": {
+       "project": {
+         "name": "...",
+         "country": "...",
+         "technology": "solar | bess | hybrid | wind | other",
+         "capacity_mwp": 32.5,
+         "capacity_mwac": null,
+         "bess_mw": null,
+         "bess_mwh": null,
+         "development_status": "greenfield | permitting | permitted | rtb | construction | cod | operational",
+         "grid_status": "one concise line",
+         "land_status": "one concise line",
+         "cod_target": "YYYY-MM-DD",
+         "location": "site, municipality or region",
+         "revenue_route": "cfd | ppa | merchant | hybrid | tbd",
+         "notes": "ONLY what has no field of its own"
+       },
+       "deal": { "deal_type": "placement | buy_side | sell_side", "asking_price": null, "currency": "EUR", "modeled_irr": null },
+       "contacts": [
+         { "name": "...", "company": "...", "role": "seller | introducer | lawyer | investor | lender | advisor | other",
+           "email": "...", "role_on_project": "Seller", "notes": "fee terms if stated" }
+       ],
+       "risks": [ { "title": "...", "detail": "...", "severity": "low | medium | high | blocker" } ],
+       "next_action": { "text": "...", "due": "YYYY-MM-DD" },
+       "docs": [ { "file_name": "...", "category": "teaser" } ]
+     }
+   }
+   JSON
+   python3 routine/ingest.py insert inbox_items @/tmp/item.json
    ```
-   Include only the payload parts that apply. For a teaser of an unknown project use
-   `"suggested_type":"new_project"` and fill `payload.project` from the teaser content you
-   can read. List attachment filenames under `payload.docs` even when you could not upload
-   them, so the human knows what to attach.
+
+   **Fill the fields, do not write a paragraph.** Every figure you can read belongs in its
+   own field; `notes` is only for what has no field. Worked example: a teaser saying
+   "13 x 2.5 MW turbines, COD January 2020, PPA at 68 USD/MWh to April 2047" becomes
+   `technology: "wind"`, `capacity_mwp: 32.5`, `development_status: "operational"`,
+   `cod_target: "2020-01-01"`, `revenue_route: "ppa"`, with a note only for what has no
+   home, such as the capacity factor and the EBITDA scenarios. A payload whose `project`
+   carries just a name and country, with everything else in `notes`, is wrong and will be
+   sent back.
+
+   **Contacts.** Always include the sender unless they are Ege or Güray, with the role the
+   email shows them in. Add anyone else named as acting on the deal: seller, introducer,
+   lawyer. These become project contacts, so provenance and fee terms are never lost.
+
+   **Risks.** Record what the document actually supports, never invented ones. For an
+   operating asset that usually means a PPA expiring well before end of life, figures that
+   are seller-stated and unverified, or single-offtaker concentration. If the email raises
+   none, send an empty list.
+
+   Omit any payload section that does not apply. List attachment filenames under `docs`
+   even when you could not upload the bytes, so the human knows what to attach.
    Then: `python3 routine/ingest.py mark "gmail:<messageId>" "<subject>" review`
 
    **C. Noise** (newsletters, spam, out-of-office, pure logistics):
